@@ -1,94 +1,191 @@
 import { ApifyClient } from 'apify-client';
-import { readFileSync, writeFileSync, existsSync, watchFile } from 'fs';
 import { createServer } from 'http';
 import { createHash, randomBytes } from 'crypto';
+import pg from 'pg';
+
+const { Pool } = pg;
 
 // ============================================
 // Configuration
 // ============================================
-const CONFIG_FILE = process.env.CONFIG_FILE || './config.json';
 const PORT = process.env.PORT || 3000;
 const APIFY_TOKEN = process.env.APIFY_TOKEN;
+const DATABASE_URL = process.env.DATABASE_URL;
 
-// Auth config
-const AUTH_USERNAME = process.env.AUTH_USERNAME || 'felipegoulu';
-const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'changeme';
-const sessions = new Map(); // token -> { username, expires }
+// Default auth (can be overridden in DB)
+const DEFAULT_USERNAME = 'felipegoulu';
+const DEFAULT_PASSWORD = process.env.AUTH_PASSWORD || 'changeme';
 
-// Default config
-const defaultConfig = {
-  webhookUrl: '',
-  handles: [],
-  pollIntervalMinutes: 15,
-};
-
-let config = { ...defaultConfig };
+let pool = null;
 let pollTimeout = null;
 let client = null;
 
 // ============================================
+// Database setup
+// ============================================
+async function initDb() {
+  pool = new Pool({ connectionString: DATABASE_URL });
+  
+  // Create tables
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS config (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      webhook_url TEXT DEFAULT '',
+      handles TEXT[] DEFAULT '{}',
+      poll_interval_minutes INTEGER DEFAULT 15,
+      CHECK (id = 1)
+    )
+  `);
+  
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS state (
+      handle TEXT PRIMARY KEY,
+      last_seen_id TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      username TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  
+  // Insert default config if not exists
+  await pool.query(`
+    INSERT INTO config (id) VALUES (1)
+    ON CONFLICT (id) DO NOTHING
+  `);
+  
+  // Insert default user if not exists
+  const passwordHash = hashPassword(DEFAULT_PASSWORD);
+  await pool.query(`
+    INSERT INTO users (username, password_hash) VALUES ($1, $2)
+    ON CONFLICT (username) DO NOTHING
+  `, [DEFAULT_USERNAME, passwordHash]);
+  
+  console.log('[DB] Initialized');
+}
+
+function hashPassword(password) {
+  return createHash('sha256').update(password).digest('hex');
+}
+
+// ============================================
 // Config management
 // ============================================
-function loadConfig() {
-  try {
-    if (existsSync(CONFIG_FILE)) {
-      const data = readFileSync(CONFIG_FILE, 'utf-8');
-      const loaded = JSON.parse(data);
-      config = { ...defaultConfig, ...loaded };
-      console.log(`[Config] Loaded: ${config.handles.length} handles, ${config.pollIntervalMinutes}min interval`);
-    } else {
-      saveConfig(config);
-      console.log('[Config] Created default config file');
-    }
-  } catch (err) {
-    console.error('[Config] Error loading:', err.message);
-  }
-  return config;
+async function getConfig() {
+  const result = await pool.query('SELECT * FROM config WHERE id = 1');
+  const row = result.rows[0];
+  return {
+    webhookUrl: row.webhook_url || '',
+    handles: row.handles || [],
+    pollIntervalMinutes: row.poll_interval_minutes || 15,
+  };
 }
 
-function saveConfig(newConfig) {
-  try {
-    config = { ...defaultConfig, ...newConfig };
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-    console.log('[Config] Saved');
-    return true;
-  } catch (err) {
-    console.error('[Config] Error saving:', err.message);
-    return false;
-  }
+async function saveConfig(config) {
+  await pool.query(`
+    UPDATE config SET
+      webhook_url = $1,
+      handles = $2,
+      poll_interval_minutes = $3
+    WHERE id = 1
+  `, [
+    config.webhookUrl || '',
+    config.handles || [],
+    config.pollIntervalMinutes || 15,
+  ]);
+  console.log('[Config] Saved');
 }
 
 // ============================================
-// State management (tracks last seen tweets)
+// State management
 // ============================================
-const STATE_FILE = process.env.STATE_FILE || './state.json';
-
-function loadState() {
-  try {
-    if (existsSync(STATE_FILE)) {
-      return JSON.parse(readFileSync(STATE_FILE, 'utf-8'));
-    }
-  } catch (err) {
-    console.error('[State] Error loading:', err.message);
-  }
-  return { lastSeenIds: {}, lastPoll: null };
+async function getLastSeenId(handle) {
+  const result = await pool.query(
+    'SELECT last_seen_id FROM state WHERE handle = $1',
+    [handle.toLowerCase()]
+  );
+  return result.rows[0]?.last_seen_id || null;
 }
 
-function saveState(state) {
-  try {
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.error('[State] Error saving:', err.message);
+async function setLastSeenId(handle, tweetId) {
+  await pool.query(`
+    INSERT INTO state (handle, last_seen_id, updated_at)
+    VALUES ($1, $2, NOW())
+    ON CONFLICT (handle) DO UPDATE SET
+      last_seen_id = $2,
+      updated_at = NOW()
+  `, [handle.toLowerCase(), tweetId]);
+}
+
+async function getState() {
+  const result = await pool.query('SELECT * FROM state');
+  const lastSeenIds = {};
+  for (const row of result.rows) {
+    lastSeenIds[row.handle] = row.last_seen_id;
   }
+  return { lastSeenIds };
+}
+
+// ============================================
+// Auth management
+// ============================================
+async function validateCredentials(username, password) {
+  const result = await pool.query(
+    'SELECT password_hash FROM users WHERE username = $1',
+    [username]
+  );
+  if (result.rows.length === 0) return false;
+  return result.rows[0].password_hash === hashPassword(password);
+}
+
+async function createSession(username) {
+  const token = randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+  
+  await pool.query(`
+    INSERT INTO sessions (token, username, expires_at)
+    VALUES ($1, $2, $3)
+  `, [token, username, expiresAt]);
+  
+  return token;
+}
+
+async function validateSession(token) {
+  const result = await pool.query(`
+    SELECT username FROM sessions
+    WHERE token = $1 AND expires_at > NOW()
+  `, [token]);
+  
+  return result.rows[0]?.username || null;
+}
+
+async function deleteSession(token) {
+  await pool.query('DELETE FROM sessions WHERE token = $1', [token]);
+}
+
+async function cleanupExpiredSessions() {
+  await pool.query('DELETE FROM sessions WHERE expires_at < NOW()');
 }
 
 // ============================================
 // Apify Tweet Scraper
 // ============================================
 async function fetchLatestTweets(handles, maxItemsPerHandle = 10) {
-  if (!handles || handles.length === 0) {
-    return [];
-  }
+  if (!handles || handles.length === 0) return [];
   
   console.log(`[${ts()}] Fetching tweets from: ${handles.map(h => '@' + h).join(', ')}...`);
   
@@ -113,7 +210,7 @@ async function fetchLatestTweets(handles, maxItemsPerHandle = 10) {
 // ============================================
 // Webhook sender
 // ============================================
-async function sendToWebhook(tweet) {
+async function sendToWebhook(config, tweet) {
   if (!config.webhookUrl) {
     console.log('[Webhook] No webhook URL configured');
     return false;
@@ -155,9 +252,7 @@ async function sendToWebhook(tweet) {
       body: JSON.stringify(payload),
     });
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     console.log(`[Webhook] Sent tweet ${tweet.id}`);
     return true;
   } catch (err) {
@@ -170,20 +265,20 @@ async function sendToWebhook(tweet) {
 // Polling logic
 // ============================================
 async function poll() {
+  const config = await getConfig();
+  
   if (config.handles.length === 0) {
     console.log(`[${ts()}] No handles configured, skipping poll`);
-    schedulePoll();
+    schedulePoll(config.pollIntervalMinutes);
     return;
   }
 
-  const state = loadState();
-  
   try {
     const tweets = await fetchLatestTweets(config.handles);
     
     if (tweets.length === 0) {
       console.log(`[${ts()}] No tweets found`);
-      schedulePoll();
+      schedulePoll(config.pollIntervalMinutes);
       return;
     }
 
@@ -201,12 +296,11 @@ async function poll() {
     for (const [author, authorTweets] of Object.entries(byAuthor)) {
       authorTweets.sort((a, b) => b.id.localeCompare(a.id)); // newest first
       
-      const lastSeenId = state.lastSeenIds[author];
+      const lastSeenId = await getLastSeenId(author);
       
       if (!lastSeenId) {
-        // First time seeing this author
         console.log(`[${ts()}] First poll for @${author}, initializing state`);
-        state.lastSeenIds[author] = authorTweets[0].id;
+        await setLastSeenId(author, authorTweets[0].id);
         continue;
       }
 
@@ -219,12 +313,12 @@ async function poll() {
         // Send oldest first
         newTweets.reverse();
         for (const tweet of newTweets) {
-          await sendToWebhook(tweet);
+          await sendToWebhook(config, tweet);
           newCount++;
         }
         
         // Update last seen
-        state.lastSeenIds[author] = authorTweets[0].id;
+        await setLastSeenId(author, authorTweets[0].id);
       }
     }
 
@@ -232,64 +326,64 @@ async function poll() {
       console.log(`[${ts()}] No new tweets`);
     }
 
-    state.lastPoll = new Date().toISOString();
-    saveState(state);
-
   } catch (err) {
     console.error(`[${ts()}] Poll error:`, err.message);
   }
 
-  schedulePoll();
+  schedulePoll(config.pollIntervalMinutes);
 }
 
-function schedulePoll() {
-  if (pollTimeout) {
-    clearTimeout(pollTimeout);
-  }
+function schedulePoll(intervalMinutes) {
+  if (pollTimeout) clearTimeout(pollTimeout);
   
-  const intervalMs = config.pollIntervalMinutes * 60 * 1000;
-  console.log(`[${ts()}] Next poll in ${config.pollIntervalMinutes} minutes`);
+  const intervalMs = intervalMinutes * 60 * 1000;
+  console.log(`[${ts()}] Next poll in ${intervalMinutes} minutes`);
   
   pollTimeout = setTimeout(poll, intervalMs);
 }
 
 function restartPolling() {
-  console.log('[Polling] Restarting with new config...');
-  if (pollTimeout) {
-    clearTimeout(pollTimeout);
-  }
+  console.log('[Polling] Restarting...');
+  if (pollTimeout) clearTimeout(pollTimeout);
   poll();
 }
 
 // ============================================
-// Auth helpers
+// HTTP helpers
 // ============================================
-function generateToken() {
-  return randomBytes(32).toString('hex');
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(body || '{}'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
-function validateSession(req) {
+async function requireAuth(req, res) {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return null;
-  }
-  const token = authHeader.slice(7);
-  const session = sessions.get(token);
-  if (!session || session.expires < Date.now()) {
-    sessions.delete(token);
-    return null;
-  }
-  return session;
-}
-
-function requireAuth(req, res) {
-  const session = validateSession(req);
-  if (!session) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
-    return false;
+    return null;
   }
-  return true;
+  
+  const token = authHeader.slice(7);
+  const username = await validateSession(token);
+  
+  if (!username) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return null;
+  }
+  
+  return username;
 }
 
 // ============================================
@@ -311,146 +405,139 @@ function createApiServer() {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const path = url.pathname;
 
-    // Health check (public)
-    if (path === '/health' && req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
-      return;
-    }
-
-    // Login
-    if (path === '/auth/login' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        try {
-          const { username, password } = JSON.parse(body);
-          
-          if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
-            const token = generateToken();
-            const expires = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
-            sessions.set(token, { username, expires });
-            
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, token, username }));
-          } else {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Invalid credentials' }));
-          }
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid request' }));
-        }
-      });
-      return;
-    }
-
-    // Check auth status
-    if (path === '/auth/me' && req.method === 'GET') {
-      const session = validateSession(req);
-      if (session) {
+    try {
+      // Health check (public)
+      if (path === '/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ authenticated: true, username: session.username }));
-      } else {
+        res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+        return;
+      }
+
+      // Login
+      if (path === '/auth/login' && req.method === 'POST') {
+        const { username, password } = await parseBody(req);
+        
+        if (await validateCredentials(username, password)) {
+          const token = await createSession(username);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, token, username }));
+        } else {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid credentials' }));
+        }
+        return;
+      }
+
+      // Check auth status
+      if (path === '/auth/me' && req.method === 'GET') {
+        const authHeader = req.headers['authorization'];
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const username = await validateSession(authHeader.slice(7));
+          if (username) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ authenticated: true, username }));
+            return;
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ authenticated: false }));
+        return;
       }
-      return;
-    }
 
-    // Logout
-    if (path === '/auth/logout' && req.method === 'POST') {
-      const authHeader = req.headers['authorization'];
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        sessions.delete(authHeader.slice(7));
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true }));
-      return;
-    }
-
-    // === Protected routes below ===
-
-    // Get config
-    if (path === '/config' && req.method === 'GET') {
-      if (!requireAuth(req, res)) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(config));
-      return;
-    }
-
-    // Update config
-    if (path === '/config' && req.method === 'PUT') {
-      if (!requireAuth(req, res)) return;
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        try {
-          const newConfig = JSON.parse(body);
-          
-          // Validate
-          if (newConfig.webhookUrl !== undefined && typeof newConfig.webhookUrl !== 'string') {
-            throw new Error('webhookUrl must be a string');
-          }
-          if (newConfig.handles !== undefined && !Array.isArray(newConfig.handles)) {
-            throw new Error('handles must be an array');
-          }
-          if (newConfig.pollIntervalMinutes !== undefined) {
-            const interval = parseInt(newConfig.pollIntervalMinutes);
-            if (isNaN(interval) || interval < 1 || interval > 1440) {
-              throw new Error('pollIntervalMinutes must be between 1 and 1440');
-            }
-            newConfig.pollIntervalMinutes = interval;
-          }
-
-          // Clean handles
-          if (newConfig.handles) {
-            newConfig.handles = newConfig.handles
-              .map(h => h.replace(/^@/, '').trim().toLowerCase())
-              .filter(Boolean);
-          }
-
-          saveConfig(newConfig);
-          restartPolling();
-
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, config }));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+      // Logout
+      if (path === '/auth/logout' && req.method === 'POST') {
+        const authHeader = req.headers['authorization'];
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          await deleteSession(authHeader.slice(7));
         }
-      });
-      return;
-    }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+        return;
+      }
 
-    // Get state/status
-    if (path === '/status' && req.method === 'GET') {
-      if (!requireAuth(req, res)) return;
-      const state = loadState();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        config,
-        state,
-        nextPoll: pollTimeout ? 'scheduled' : 'not scheduled',
-      }));
-      return;
-    }
+      // === Protected routes ===
 
-    // Force poll now
-    if (path === '/poll' && req.method === 'POST') {
-      if (!requireAuth(req, res)) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'Poll triggered' }));
+      // Get config
+      if (path === '/config' && req.method === 'GET') {
+        if (!await requireAuth(req, res)) return;
+        const config = await getConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(config));
+        return;
+      }
+
+      // Update config
+      if (path === '/config' && req.method === 'PUT') {
+        if (!await requireAuth(req, res)) return;
+        
+        const body = await parseBody(req);
+        const currentConfig = await getConfig();
+        
+        const newConfig = {
+          webhookUrl: body.webhookUrl ?? currentConfig.webhookUrl,
+          handles: body.handles ?? currentConfig.handles,
+          pollIntervalMinutes: body.pollIntervalMinutes ?? currentConfig.pollIntervalMinutes,
+        };
+        
+        // Validate
+        if (typeof newConfig.webhookUrl !== 'string') {
+          throw new Error('webhookUrl must be a string');
+        }
+        if (!Array.isArray(newConfig.handles)) {
+          throw new Error('handles must be an array');
+        }
+        
+        const interval = parseInt(newConfig.pollIntervalMinutes);
+        if (isNaN(interval) || interval < 1 || interval > 1440) {
+          throw new Error('pollIntervalMinutes must be between 1 and 1440');
+        }
+        newConfig.pollIntervalMinutes = interval;
+        
+        // Clean handles
+        newConfig.handles = newConfig.handles
+          .map(h => h.replace(/^@/, '').trim().toLowerCase())
+          .filter(Boolean);
+        
+        await saveConfig(newConfig);
+        restartPolling();
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, config: newConfig }));
+        return;
+      }
+
+      // Get status
+      if (path === '/status' && req.method === 'GET') {
+        if (!await requireAuth(req, res)) return;
+        const config = await getConfig();
+        const state = await getState();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          config,
+          state,
+          nextPoll: pollTimeout ? 'scheduled' : 'not scheduled',
+        }));
+        return;
+      }
+
+      // Force poll
+      if (path === '/poll' && req.method === 'POST') {
+        if (!await requireAuth(req, res)) return;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: 'Poll triggered' }));
+        restartPolling();
+        return;
+      }
+
+      // 404
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
       
-      // Run poll async
-      if (pollTimeout) clearTimeout(pollTimeout);
-      poll();
-      return;
+    } catch (err) {
+      console.error('[API] Error:', err.message);
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
     }
-
-    // 404
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
   });
 
   return server;
@@ -468,7 +555,7 @@ function ts() {
 // ============================================
 async function main() {
   console.log('========================================');
-  console.log('  Tweet Watcher - Dashboard Edition');
+  console.log('  Tweet Watcher - PostgreSQL Edition');
   console.log('========================================');
 
   if (!APIFY_TOKEN) {
@@ -476,22 +563,24 @@ async function main() {
     process.exit(1);
   }
 
+  if (!DATABASE_URL) {
+    console.error('ERROR: DATABASE_URL environment variable is required');
+    process.exit(1);
+  }
+
+  // Initialize database
+  await initDb();
+  
+  // Cleanup expired sessions periodically
+  setInterval(cleanupExpiredSessions, 60 * 60 * 1000); // every hour
+
   // Initialize Apify client
   client = new ApifyClient({ token: APIFY_TOKEN });
-
-  // Load config
-  loadConfig();
 
   // Start API server
   const server = createApiServer();
   server.listen(PORT, () => {
     console.log(`[API] Server running on port ${PORT}`);
-    console.log(`[API] Endpoints:`);
-    console.log(`      GET  /health - Health check`);
-    console.log(`      GET  /config - Get current config`);
-    console.log(`      PUT  /config - Update config`);
-    console.log(`      GET  /status - Get full status`);
-    console.log(`      POST /poll   - Force poll now`);
     console.log('========================================\n');
   });
 
@@ -500,13 +589,15 @@ async function main() {
 }
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('\n[Shutdown] SIGTERM received');
+  if (pool) await pool.end();
   process.exit(0);
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('\n[Shutdown] SIGINT received');
+  if (pool) await pool.end();
   process.exit(0);
 });
 

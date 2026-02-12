@@ -12,9 +12,17 @@
     "node": ">=18"
   },
   "dependencies": {
-    "apify-client": "^2.9.0"
+    "apify-client": "^2.9.0",
+    "pg": "^8.18.0"
   },
-  "keywords": ["twitter", "x", "elon", "musk", "monitor", "webhook"],
+  "keywords": [
+    "twitter",
+    "x",
+    "elon",
+    "musk",
+    "monitor",
+    "webhook"
+  ],
   "author": "",
   "license": "MIT"
 }
