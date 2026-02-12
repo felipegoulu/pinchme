@@ -25,6 +25,10 @@ export default function Dashboard() {
   const [passwordForm, setPasswordForm] = useState({ current: '', new: '', confirm: '' });
   const [passwordError, setPasswordError] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
+  
+  const [handleConfigs, setHandleConfigs] = useState({});
+  const [editingHandle, setEditingHandle] = useState(null);
+  const [handleConfigForm, setHandleConfigForm] = useState({ mode: 'now', prompt: '', channel: '' });
 
   useEffect(() => { checkAuth(); }, []);
 
@@ -50,7 +54,7 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.authenticated) {
         setAuth({ checked: true, authenticated: true, username: data.username });
-        fetchConfig(); fetchStatus();
+        fetchConfig(); fetchStatus(); fetchHandleConfigs();
       } else { clearToken(); setAuth({ checked: true, authenticated: false, username: '' }); setLoading(false); }
     } catch { clearToken(); setAuth({ checked: true, authenticated: false, username: '' }); setLoading(false); }
   }
@@ -63,7 +67,7 @@ export default function Dashboard() {
         body: JSON.stringify(loginForm),
       });
       const data = await res.json();
-      if (data.success) { setToken(data.token); setAuth({ checked: true, authenticated: true, username: data.username }); fetchConfig(); fetchStatus(); }
+      if (data.success) { setToken(data.token); setAuth({ checked: true, authenticated: true, username: data.username }); fetchConfig(); fetchStatus(); fetchHandleConfigs(); }
       else setLoginError(data.error || 'Login failed');
     } catch { setLoginError('Connection error'); }
   }
@@ -101,6 +105,44 @@ export default function Dashboard() {
 
   async function fetchStatus() {
     try { const res = await fetch(`${API_URL}/status`, { headers: authHeaders() }); if (res.ok) setStatus(await res.json()); } catch {}
+  }
+
+  async function fetchHandleConfigs() {
+    try {
+      const res = await fetch(`${API_URL}/handle-config`, { headers: authHeaders() });
+      if (res.ok) {
+        const configs = await res.json();
+        const configMap = {};
+        configs.forEach(c => { configMap[c.handle] = c; });
+        setHandleConfigs(configMap);
+      }
+    } catch {}
+  }
+
+  async function saveHandleConfig(handle) {
+    try {
+      const res = await fetch(`${API_URL}/handle-config/${handle}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(handleConfigForm),
+      });
+      if (res.ok) {
+        setMessage({ type: 'success', text: `Config saved for @${handle}` });
+        fetchHandleConfigs();
+        setEditingHandle(null);
+      } else {
+        const err = await res.json();
+        setMessage({ type: 'error', text: err.error || 'Failed to save' });
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Connection error' });
+    }
+  }
+
+  function openHandleConfig(handle) {
+    const existing = handleConfigs[handle] || { mode: 'now', prompt: '', channel: '' };
+    setHandleConfigForm({ mode: existing.mode || 'now', prompt: existing.prompt || '', channel: existing.channel || '' });
+    setEditingHandle(handle);
   }
 
   async function saveConfig() {
@@ -226,6 +268,8 @@ export default function Dashboard() {
                 config.handles.map(h => (
                   <div key={h} className="handle-tag">
                     <a href={`https://x.com/${h}`} target="_blank" rel="noopener noreferrer">@{h}</a>
+                    {handleConfigs[h]?.prompt && <span className="config-badge" title="Has custom prompt">⚡</span>}
+                    <button className="config-btn" onClick={() => openHandleConfig(h)} title="Configure">⚙</button>
                     <button onClick={() => removeHandle(h)}>×</button>
                   </div>
                 ))
@@ -302,6 +346,51 @@ export default function Dashboard() {
                 <button type="submit" className="btn-primary" disabled={changingPassword}>{changingPassword ? 'Saving...' : 'Update'}</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {editingHandle && (
+        <div className="modal-overlay" onClick={() => setEditingHandle(null)}>
+          <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
+            <h3>Configure @{editingHandle}</h3>
+            
+            <label>Mode</label>
+            <div className="radio-group">
+              <label className={`radio-option ${handleConfigForm.mode === 'now' ? 'selected' : ''}`}>
+                <input type="radio" name="mode" value="now" checked={handleConfigForm.mode === 'now'} onChange={e => setHandleConfigForm({...handleConfigForm, mode: e.target.value})} />
+                <span className="radio-label">Instant</span>
+                <span className="radio-desc">Notify immediately</span>
+              </label>
+              <label className={`radio-option ${handleConfigForm.mode === 'next-heartbeat' ? 'selected' : ''}`}>
+                <input type="radio" name="mode" value="next-heartbeat" checked={handleConfigForm.mode === 'next-heartbeat'} onChange={e => setHandleConfigForm({...handleConfigForm, mode: e.target.value})} />
+                <span className="radio-label">Batched</span>
+                <span className="radio-desc">Wait for next heartbeat</span>
+              </label>
+            </div>
+
+            <label>Channel</label>
+            <select value={handleConfigForm.channel} onChange={e => setHandleConfigForm({...handleConfigForm, channel: e.target.value})}>
+              <option value="">Default (active session)</option>
+              <option value="telegram">Telegram</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="discord">Discord</option>
+            </select>
+            <span className="hint">Where to send notifications</span>
+
+            <label>Custom Prompt</label>
+            <textarea 
+              value={handleConfigForm.prompt} 
+              onChange={e => setHandleConfigForm({...handleConfigForm, prompt: e.target.value})}
+              placeholder="e.g., Analyze this tweet and give your opinion"
+              rows={3}
+            />
+            <span className="hint">Instructions for how OpenClaw should process tweets from this account</span>
+
+            <div className="modal-actions">
+              <button type="button" className="btn-secondary" onClick={() => setEditingHandle(null)}>Cancel</button>
+              <button type="button" className="btn-primary" onClick={() => saveHandleConfig(editingHandle)}>Save</button>
+            </div>
           </div>
         </div>
       )}
@@ -768,5 +857,111 @@ const styles = `
     justify-content: flex-end;
     gap: 12px;
     margin-top: 24px;
+  }
+
+  .modal-wide {
+    max-width: 480px;
+  }
+
+  .config-badge {
+    font-size: 12px;
+    margin-left: 4px;
+  }
+
+  .config-btn {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0 4px;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+  }
+
+  .config-btn:hover {
+    opacity: 1;
+    color: #0070f3;
+  }
+
+  .radio-group {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .radio-option {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .radio-option:hover {
+    border-color: #666;
+  }
+
+  .radio-option.selected {
+    border-color: #0070f3;
+    background: rgba(0, 112, 243, 0.1);
+  }
+
+  .radio-option input {
+    display: none;
+  }
+
+  .radio-label {
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+
+  .radio-desc {
+    font-size: 12px;
+    color: #666;
+  }
+
+  select {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #fafafa;
+    outline: none;
+    cursor: pointer;
+    margin-bottom: 4px;
+  }
+
+  select:focus {
+    border-color: #666;
+  }
+
+  textarea {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 6px;
+    color: #fafafa;
+    outline: none;
+    resize: vertical;
+    font-family: inherit;
+    box-sizing: border-box;
+  }
+
+  textarea:focus {
+    border-color: #666;
+  }
+
+  textarea::placeholder {
+    color: #444;
   }
 `;

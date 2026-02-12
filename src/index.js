@@ -62,6 +62,17 @@ async function initDb() {
     )
   `);
   
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS handle_config (
+      handle TEXT PRIMARY KEY,
+      mode TEXT DEFAULT 'now',
+      prompt TEXT DEFAULT '',
+      channel TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  
   // Insert default config if not exists
   await pool.query(`
     INSERT INTO config (id) VALUES (1)
@@ -141,6 +152,46 @@ async function getState() {
 }
 
 // ============================================
+// Handle config management
+// ============================================
+async function getHandleConfig(handle) {
+  const result = await pool.query(
+    'SELECT * FROM handle_config WHERE handle = $1',
+    [handle.toLowerCase()]
+  );
+  if (result.rows.length === 0) {
+    return { handle: handle.toLowerCase(), mode: 'now', prompt: '', channel: '' };
+  }
+  return result.rows[0];
+}
+
+async function getAllHandleConfigs() {
+  const result = await pool.query('SELECT * FROM handle_config ORDER BY handle');
+  return result.rows;
+}
+
+async function setHandleConfig(handle, config) {
+  await pool.query(`
+    INSERT INTO handle_config (handle, mode, prompt, channel, updated_at)
+    VALUES ($1, $2, $3, $4, NOW())
+    ON CONFLICT (handle) DO UPDATE SET
+      mode = $2,
+      prompt = $3,
+      channel = $4,
+      updated_at = NOW()
+  `, [
+    handle.toLowerCase(),
+    config.mode || 'now',
+    config.prompt || '',
+    config.channel || ''
+  ]);
+}
+
+async function deleteHandleConfig(handle) {
+  await pool.query('DELETE FROM handle_config WHERE handle = $1', [handle.toLowerCase()]);
+}
+
+// ============================================
 // Auth management
 // ============================================
 async function validateCredentials(username, password) {
@@ -210,7 +261,7 @@ async function fetchLatestTweets(handles, maxItemsPerHandle = 10) {
 // ============================================
 // Webhook sender
 // ============================================
-async function sendToWebhook(config, tweet) {
+async function sendToWebhook(config, tweet, handleConfig) {
   if (!config.webhookUrl) {
     console.log('[Webhook] No webhook URL configured');
     return false;
@@ -219,6 +270,11 @@ async function sendToWebhook(config, tweet) {
   const payload = {
     event: 'new_tweet',
     timestamp: new Date().toISOString(),
+    handleConfig: {
+      mode: handleConfig?.mode || 'now',
+      prompt: handleConfig?.prompt || '',
+      channel: handleConfig?.channel || '',
+    },
     tweet: {
       id: tweet.id,
       url: tweet.url,
@@ -310,10 +366,13 @@ async function poll() {
       if (newTweets.length > 0) {
         console.log(`[${ts()}] Found ${newTweets.length} new tweet(s) from @${author}`);
         
+        // Get handle-specific config
+        const handleConfig = await getHandleConfig(author);
+        
         // Send oldest first
         newTweets.reverse();
         for (const tweet of newTweets) {
-          await sendToWebhook(config, tweet);
+          await sendToWebhook(config, tweet, handleConfig);
           newCount++;
         }
         
@@ -561,6 +620,75 @@ function createApiServer() {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, message: 'Poll triggered' }));
         restartPolling();
+        return;
+      }
+
+      // Get all handle configs
+      if (path === '/handle-config' && req.method === 'GET') {
+        if (!await requireAuth(req, res)) return;
+        const configs = await getAllHandleConfigs();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(configs));
+        return;
+      }
+
+      // Get single handle config
+      if (path.startsWith('/handle-config/') && req.method === 'GET') {
+        if (!await requireAuth(req, res)) return;
+        const handle = path.split('/')[2];
+        if (!handle) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Handle required' }));
+          return;
+        }
+        const config = await getHandleConfig(handle);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(config));
+        return;
+      }
+
+      // Create/update handle config
+      if (path.startsWith('/handle-config/') && req.method === 'PUT') {
+        if (!await requireAuth(req, res)) return;
+        const handle = path.split('/')[2];
+        if (!handle) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Handle required' }));
+          return;
+        }
+        const body = await parseBody(req);
+        
+        // Validate mode
+        if (body.mode && !['now', 'next-heartbeat'].includes(body.mode)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Mode must be "now" or "next-heartbeat"' }));
+          return;
+        }
+        
+        await setHandleConfig(handle, {
+          mode: body.mode,
+          prompt: body.prompt,
+          channel: body.channel,
+        });
+        
+        const updated = await getHandleConfig(handle);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, config: updated }));
+        return;
+      }
+
+      // Delete handle config
+      if (path.startsWith('/handle-config/') && req.method === 'DELETE') {
+        if (!await requireAuth(req, res)) return;
+        const handle = path.split('/')[2];
+        if (!handle) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Handle required' }));
+          return;
+        }
+        await deleteHandleConfig(handle);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
         return;
       }
 

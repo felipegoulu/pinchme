@@ -9,12 +9,13 @@ const OPENCLAW_CMD = process.env.OPENCLAW_CMD || 'openclaw';
 // Store recent tweets to avoid duplicates
 const recentTweets = new Set();
 
-function sendToOpenClaw(tweet) {
-  const message = formatTweetMessage(tweet);
+function sendToOpenClaw(tweet, handleConfig = {}) {
+  const message = formatTweetMessage(tweet, handleConfig);
+  const mode = handleConfig.mode || 'now';
   
   // Send to OpenClaw via CLI - uses system event to inject into main session
   const escapedMessage = message.replace(/"/g, '\\"').replace(/\n/g, '\\n');
-  const cmd = `${OPENCLAW_CMD} system event --text "${escapedMessage}" --mode now`;
+  const cmd = `${OPENCLAW_CMD} system event --text "${escapedMessage}" --mode ${mode}`;
   
   exec(cmd, (error, stdout, stderr) => {
     if (error) {
@@ -26,12 +27,24 @@ function sendToOpenClaw(tweet) {
       console.log(`[Fallback] Written to ${logFile}`);
       return;
     }
-    console.log(`[OpenClaw] Sent: @${tweet.author}`);
+    console.log(`[OpenClaw] Sent: @${tweet.author} (mode: ${mode})`);
   });
 }
 
-function formatTweetMessage(tweet) {
-  let msg = `🐦 New tweet from @${tweet.author}`;
+function formatTweetMessage(tweet, handleConfig = {}) {
+  let msg = '';
+  
+  // Add custom prompt/instructions if configured
+  if (handleConfig.prompt) {
+    msg += `INSTRUCCIÓN: ${handleConfig.prompt}\n\n`;
+  }
+  
+  // Add channel instruction if configured
+  if (handleConfig.channel) {
+    msg += `CANAL: Respondé por ${handleConfig.channel}\n\n`;
+  }
+  
+  msg += `🐦 New tweet from @${tweet.author}`;
   
   if (tweet.isReply) {
     msg += ` (reply to @${tweet.inReplyToUser})`;
@@ -101,8 +114,11 @@ const server = http.createServer((req, res) => {
           
           console.log(`[Tweet] @${tweet.author}: ${tweet.text?.substring(0, 50)}...`);
           
+          // Get handle config from payload
+          const handleConfig = payload.handleConfig || {};
+          
           // Send to OpenClaw
-          sendToOpenClaw(tweet);
+          sendToOpenClaw(tweet, handleConfig);
         }
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
