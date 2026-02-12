@@ -102,7 +102,19 @@ export default function Dashboard() {
   async function fetchConfig() {
     try {
       const res = await fetch(`${API_URL}/config`, { headers: authHeaders() });
-      if (res.ok) setConfig(await res.json());
+      if (res.ok) {
+        const cfg = await res.json();
+        setConfig(cfg);
+        // Fetch OpenClaw config via API proxy (avoids mixed content)
+        if (cfg.webhookUrl) {
+          try {
+            const ocRes = await fetch(`${API_URL}/openclaw/config`, { headers: authHeaders() });
+            if (ocRes.ok) {
+              setOpenclawConfig(await ocRes.json());
+            }
+          } catch (e) { console.log('OpenClaw config fetch failed:', e); }
+        }
+      }
       else if (res.status === 401) { clearToken(); setAuth({ checked: true, authenticated: false, username: '' }); }
     } catch { setMessage({ type: 'error', text: 'Failed to load config' }); }
     finally { setLoading(false); }
@@ -150,12 +162,11 @@ export default function Dashboard() {
     setEditingHandle(handle);
   }
 
-  // OpenClaw config functions
+  // OpenClaw config functions (via API proxy to avoid mixed content)
   async function fetchOpenclawConfig() {
     if (!config.webhookUrl) return;
     try {
-      const webhookBase = config.webhookUrl.replace(/\/$/, '');
-      const res = await fetch(`${webhookBase}/openclaw/config`);
+      const res = await fetch(`${API_URL}/openclaw/config`, { headers: authHeaders() });
       if (res.ok) {
         setOpenclawConfig(await res.json());
         fetchOpenclawHeartbeat();
@@ -168,8 +179,7 @@ export default function Dashboard() {
   async function fetchOpenclawHeartbeat() {
     if (!config.webhookUrl) return;
     try {
-      const webhookBase = config.webhookUrl.replace(/\/$/, '');
-      const res = await fetch(`${webhookBase}/openclaw/heartbeat`);
+      const res = await fetch(`${API_URL}/openclaw/heartbeat`, { headers: authHeaders() });
       if (res.ok) setOpenclawHeartbeat(await res.json());
     } catch {}
   }
@@ -178,10 +188,9 @@ export default function Dashboard() {
     if (!config.webhookUrl) return;
     setSavingOpenclaw(true);
     try {
-      const webhookBase = config.webhookUrl.replace(/\/$/, '');
-      const res = await fetch(`${webhookBase}/openclaw/config`, {
+      const res = await fetch(`${API_URL}/openclaw/config`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(newConfig),
       });
       if (res.ok) {

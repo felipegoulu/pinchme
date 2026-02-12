@@ -692,6 +692,103 @@ function createApiServer() {
         return;
       }
 
+      // ============================================
+      // OpenClaw Proxy Endpoints (forwards to webhook server)
+      // ============================================
+      
+      // Proxy: Get OpenClaw config
+      if (path === '/openclaw/config' && req.method === 'GET') {
+        if (!await requireAuth(req, res)) return;
+        const config = await getConfig();
+        if (!config.webhookUrl) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No webhook URL configured' }));
+          return;
+        }
+        try {
+          const webhookBase = config.webhookUrl.trim().replace(/\/$/, '');
+          const proxyRes = await fetch(`${webhookBase}/openclaw/config`);
+          const data = await proxyRes.json();
+          res.writeHead(proxyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(data));
+        } catch (err) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to reach webhook server: ' + err.message }));
+        }
+        return;
+      }
+
+      // Proxy: Update OpenClaw config
+      if (path === '/openclaw/config' && (req.method === 'PUT' || req.method === 'PATCH')) {
+        if (!await requireAuth(req, res)) return;
+        const config = await getConfig();
+        if (!config.webhookUrl) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No webhook URL configured' }));
+          return;
+        }
+        try {
+          const body = await parseBody(req);
+          const webhookBase = config.webhookUrl.trim().replace(/\/$/, '');
+          const proxyRes = await fetch(`${webhookBase}/openclaw/config`, {
+            method: req.method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const data = await proxyRes.json();
+          res.writeHead(proxyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(data));
+        } catch (err) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to reach webhook server: ' + err.message }));
+        }
+        return;
+      }
+
+      // Proxy: Restart OpenClaw gateway
+      if (path === '/openclaw/restart' && req.method === 'POST') {
+        if (!await requireAuth(req, res)) return;
+        const config = await getConfig();
+        if (!config.webhookUrl) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No webhook URL configured' }));
+          return;
+        }
+        try {
+          const webhookBase = config.webhookUrl.trim().replace(/\/$/, '');
+          const proxyRes = await fetch(`${webhookBase}/openclaw/restart`, { method: 'POST' });
+          const data = await proxyRes.json();
+          res.writeHead(proxyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(data));
+        } catch (err) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to reach webhook server: ' + err.message }));
+        }
+        return;
+      }
+
+      // Proxy: Get OpenClaw heartbeat status
+      if (path === '/openclaw/heartbeat' && req.method === 'GET') {
+        if (!await requireAuth(req, res)) return;
+        const config = await getConfig();
+        if (!config.webhookUrl) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No webhook URL configured' }));
+          return;
+        }
+        try {
+          const webhookBase = config.webhookUrl.trim().replace(/\/$/, '');
+          const proxyRes = await fetch(`${webhookBase}/openclaw/heartbeat`);
+          const data = await proxyRes.json();
+          res.writeHead(proxyRes.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(data));
+        } catch (err) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to reach webhook server: ' + err.message }));
+        }
+        return;
+      }
+
       // 404
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));
