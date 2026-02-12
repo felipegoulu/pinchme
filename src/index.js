@@ -455,6 +455,41 @@ function createApiServer() {
         return;
       }
 
+      // Change password
+      if (path === '/auth/password' && req.method === 'PUT') {
+        const username = await requireAuth(req, res);
+        if (!username) return;
+        
+        const { currentPassword, newPassword } = await parseBody(req);
+        
+        if (!currentPassword || !newPassword) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Current and new password required' }));
+          return;
+        }
+        
+        if (newPassword.length < 4) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Password must be at least 4 characters' }));
+          return;
+        }
+        
+        // Verify current password
+        if (!await validateCredentials(username, currentPassword)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Current password is incorrect' }));
+          return;
+        }
+        
+        // Update password
+        const newHash = hashPassword(newPassword);
+        await pool.query('UPDATE users SET password_hash = $1 WHERE username = $2', [newHash, username]);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+        return;
+      }
+
       // === Protected routes ===
 
       // Get config
