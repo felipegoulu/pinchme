@@ -5,6 +5,10 @@ import { useState, useEffect } from 'react';
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
 
 export default function Dashboard() {
+  const [auth, setAuth] = useState({ checked: false, authenticated: false, username: '' });
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+  const [loginError, setLoginError] = useState('');
+  
   const [config, setConfig] = useState({
     webhookUrl: '',
     handles: [],
@@ -17,16 +21,105 @@ export default function Dashboard() {
   const [message, setMessage] = useState(null);
 
   useEffect(() => {
-    fetchConfig();
-    fetchStatus();
+    checkAuth();
   }, []);
+
+  function getToken() {
+    return localStorage.getItem('token');
+  }
+
+  function setToken(token) {
+    localStorage.setItem('token', token);
+  }
+
+  function clearToken() {
+    localStorage.removeItem('token');
+  }
+
+  function authHeaders() {
+    const token = getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  async function checkAuth() {
+    const token = getToken();
+    if (!token) {
+      setAuth({ checked: true, authenticated: false, username: '' });
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_URL}/auth/me`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json();
+      
+      if (data.authenticated) {
+        setAuth({ checked: true, authenticated: true, username: data.username });
+        fetchConfig();
+        fetchStatus();
+      } else {
+        clearToken();
+        setAuth({ checked: true, authenticated: false, username: '' });
+        setLoading(false);
+      }
+    } catch (err) {
+      clearToken();
+      setAuth({ checked: true, authenticated: false, username: '' });
+      setLoading(false);
+    }
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoginError('');
+
+    try {
+      const res = await fetch(`${API_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginForm),
+      });
+      
+      const data = await res.json();
+      
+      if (data.success) {
+        setToken(data.token);
+        setAuth({ checked: true, authenticated: true, username: data.username });
+        fetchConfig();
+        fetchStatus();
+      } else {
+        setLoginError(data.error || 'Login failed');
+      }
+    } catch (err) {
+      setLoginError('Connection error');
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await fetch(`${API_URL}/auth/logout`, {
+        method: 'POST',
+        headers: authHeaders(),
+      });
+    } catch (err) {}
+    
+    clearToken();
+    setAuth({ checked: true, authenticated: false, username: '' });
+  }
 
   async function fetchConfig() {
     try {
-      const res = await fetch(`${API_URL}/config`);
+      const res = await fetch(`${API_URL}/config`, {
+        headers: authHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         setConfig(data);
+      } else if (res.status === 401) {
+        clearToken();
+        setAuth({ checked: true, authenticated: false, username: '' });
       }
     } catch (err) {
       console.error('Failed to fetch config:', err);
@@ -38,7 +131,9 @@ export default function Dashboard() {
 
   async function fetchStatus() {
     try {
-      const res = await fetch(`${API_URL}/status`);
+      const res = await fetch(`${API_URL}/status`, {
+        headers: authHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         setStatus(data);
@@ -54,13 +149,19 @@ export default function Dashboard() {
     try {
       const res = await fetch(`${API_URL}/config`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
         body: JSON.stringify(config),
       });
       
       if (res.ok) {
         setMessage({ type: 'success', text: 'Config saved! Polling restarted.' });
         fetchStatus();
+      } else if (res.status === 401) {
+        clearToken();
+        setAuth({ checked: true, authenticated: false, username: '' });
       } else {
         const err = await res.json();
         setMessage({ type: 'error', text: err.error || 'Failed to save' });
@@ -74,7 +175,10 @@ export default function Dashboard() {
 
   async function triggerPoll() {
     try {
-      await fetch(`${API_URL}/poll`, { method: 'POST' });
+      await fetch(`${API_URL}/poll`, { 
+        method: 'POST',
+        headers: authHeaders(),
+      });
       setMessage({ type: 'success', text: 'Poll triggered!' });
       setTimeout(fetchStatus, 2000);
     } catch (err) {
@@ -94,7 +198,48 @@ export default function Dashboard() {
     setConfig({ ...config, handles: config.handles.filter(h => h !== handle) });
   }
 
-  if (loading) {
+  // Login form
+  if (auth.checked && !auth.authenticated) {
+    return (
+      <div style={styles.container}>
+        <h1 style={styles.title}>🐦 Tweet Watcher</h1>
+        
+        <div style={styles.card}>
+          <h2 style={styles.cardTitle}>Sign In</h2>
+          
+          {loginError && (
+            <div style={{ ...styles.message, backgroundColor: '#7f1d1d', borderColor: '#dc2626' }}>
+              {loginError}
+            </div>
+          )}
+          
+          <form onSubmit={handleLogin}>
+            <input
+              type="text"
+              value={loginForm.username}
+              onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+              placeholder="Username"
+              style={styles.input}
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              value={loginForm.password}
+              onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+              placeholder="Password"
+              style={styles.input}
+              autoComplete="current-password"
+            />
+            <button type="submit" style={styles.saveButton}>
+              Sign In
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth.checked || loading) {
     return (
       <div style={styles.container}>
         <div style={styles.card}>
@@ -106,7 +251,15 @@ export default function Dashboard() {
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>🐦 Tweet Watcher</h1>
+      <div style={styles.header}>
+        <h1 style={styles.title}>🐦 Tweet Watcher</h1>
+        <div style={styles.userInfo}>
+          <span style={styles.username}>{auth.username}</span>
+          <button onClick={handleLogout} style={styles.logoutButton}>
+            Logout
+          </button>
+        </div>
+      </div>
       
       {message && (
         <div style={{
@@ -137,7 +290,7 @@ export default function Dashboard() {
             type="text"
             value={newHandle}
             onChange={(e) => setNewHandle(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addHandle()}
+            onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addHandle())}
             placeholder="@username"
             style={{ ...styles.input, flex: 1, marginBottom: 0 }}
           />
@@ -217,11 +370,34 @@ const styles = {
     margin: '0 auto',
     padding: '40px 20px',
   },
+  header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 30,
+  },
   title: {
     fontSize: 32,
     fontWeight: 700,
-    marginBottom: 30,
-    textAlign: 'center',
+    margin: 0,
+  },
+  userInfo: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+  },
+  username: {
+    color: '#a3a3a3',
+    fontSize: 14,
+  },
+  logoutButton: {
+    padding: '8px 16px',
+    fontSize: 14,
+    backgroundColor: 'transparent',
+    border: '1px solid #404040',
+    borderRadius: 6,
+    color: '#a3a3a3',
+    cursor: 'pointer',
   },
   card: {
     backgroundColor: '#171717',

@@ -1,6 +1,7 @@
 import { ApifyClient } from 'apify-client';
 import { readFileSync, writeFileSync, existsSync, watchFile } from 'fs';
 import { createServer } from 'http';
+import { createHash, randomBytes } from 'crypto';
 
 // ============================================
 // Configuration
@@ -8,6 +9,11 @@ import { createServer } from 'http';
 const CONFIG_FILE = process.env.CONFIG_FILE || './config.json';
 const PORT = process.env.PORT || 3000;
 const APIFY_TOKEN = process.env.APIFY_TOKEN;
+
+// Auth config
+const AUTH_USERNAME = process.env.AUTH_USERNAME || 'felipegoulu';
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'changeme';
+const sessions = new Map(); // token -> { username, expires }
 
 // Default config
 const defaultConfig = {
@@ -256,6 +262,37 @@ function restartPolling() {
 }
 
 // ============================================
+// Auth helpers
+// ============================================
+function generateToken() {
+  return randomBytes(32).toString('hex');
+}
+
+function validateSession(req) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return null;
+  }
+  const token = authHeader.slice(7);
+  const session = sessions.get(token);
+  if (!session || session.expires < Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+function requireAuth(req, res) {
+  const session = validateSession(req);
+  if (!session) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return false;
+  }
+  return true;
+}
+
+// ============================================
 // HTTP API Server
 // ============================================
 function createApiServer() {
@@ -263,7 +300,7 @@ function createApiServer() {
     // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -274,15 +311,69 @@ function createApiServer() {
     const url = new URL(req.url, `http://localhost:${PORT}`);
     const path = url.pathname;
 
-    // Health check
+    // Health check (public)
     if (path === '/health' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
       return;
     }
 
+    // Login
+    if (path === '/auth/login' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { username, password } = JSON.parse(body);
+          
+          if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+            const token = generateToken();
+            const expires = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+            sessions.set(token, { username, expires });
+            
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, token, username }));
+          } else {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid credentials' }));
+          }
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid request' }));
+        }
+      });
+      return;
+    }
+
+    // Check auth status
+    if (path === '/auth/me' && req.method === 'GET') {
+      const session = validateSession(req);
+      if (session) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ authenticated: true, username: session.username }));
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ authenticated: false }));
+      }
+      return;
+    }
+
+    // Logout
+    if (path === '/auth/logout' && req.method === 'POST') {
+      const authHeader = req.headers['authorization'];
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        sessions.delete(authHeader.slice(7));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    // === Protected routes below ===
+
     // Get config
     if (path === '/config' && req.method === 'GET') {
+      if (!requireAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(config));
       return;
@@ -290,6 +381,7 @@ function createApiServer() {
 
     // Update config
     if (path === '/config' && req.method === 'PUT') {
+      if (!requireAuth(req, res)) return;
       let body = '';
       req.on('data', chunk => body += chunk);
       req.on('end', () => {
@@ -333,6 +425,7 @@ function createApiServer() {
 
     // Get state/status
     if (path === '/status' && req.method === 'GET') {
+      if (!requireAuth(req, res)) return;
       const state = loadState();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -345,6 +438,7 @@ function createApiServer() {
 
     // Force poll now
     if (path === '/poll' && req.method === 'POST') {
+      if (!requireAuth(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, message: 'Poll triggered' }));
       
