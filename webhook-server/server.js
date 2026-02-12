@@ -14,7 +14,7 @@ function sendToOpenClaw(tweet) {
   
   // Send to OpenClaw via CLI - uses system event to inject into main session
   const escapedMessage = message.replace(/"/g, '\\"').replace(/\n/g, '\\n');
-  const cmd = `${OPENCLAW_CMD} system event --text "${escapedMessage}" --mode now`;
+  const cmd = `${OPENCLAW_CMD} system event --text "${escapedMessage}" --mode next-heartbeat`;
   
   exec(cmd, (error, stdout, stderr) => {
     if (error) {
