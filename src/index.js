@@ -8,8 +8,11 @@ const config = {
   // Apify
   apifyToken: process.env.APIFY_TOKEN,
   
-  // Target account
-  twitterHandle: process.env.TWITTER_HANDLE || 'elonmusk',
+  // Target accounts (comma-separated)
+  twitterHandles: (process.env.TWITTER_HANDLES || process.env.TWITTER_HANDLE || 'elonmusk')
+    .split(',')
+    .map(h => h.trim())
+    .filter(Boolean),
   
   // Polling interval (in minutes)
   pollIntervalMinutes: parseInt(process.env.POLL_INTERVAL_MINUTES || '5'),
@@ -50,13 +53,17 @@ function saveState(state) {
 // ============================================
 // Apify Tweet Scraper
 // ============================================
-async function fetchLatestTweets(client, handle, maxItems = 10) {
-  console.log(`[${new Date().toISOString()}] Fetching latest tweets from @${handle}...`);
+async function fetchLatestTweets(client, handles, maxItemsPerHandle = 10) {
+  const handleList = Array.isArray(handles) ? handles : [handles];
+  console.log(`[${new Date().toISOString()}] Fetching latest tweets from: ${handleList.map(h => '@' + h).join(', ')}...`);
+  
+  // Build search query for multiple handles: (from:user1 OR from:user2 OR ...)
+  const searchQuery = handleList.map(h => `from:${h}`).join(' OR ');
   
   const input = {
-    searchTerms: [`from:${handle}`],
+    searchTerms: [searchQuery],
     sort: 'Latest',
-    maxItems: maxItems,
+    maxItems: maxItemsPerHandle * handleList.length,
   };
 
   // Run the Tweet Scraper actor
@@ -89,7 +96,7 @@ async function sendToWebhook(tweet) {
       url: tweet.url,
       text: tweet.text,
       createdAt: tweet.createdAt,
-      author: tweet.author?.userName || config.twitterHandle,
+      author: tweet.author?.userName || 'unknown',
       authorName: tweet.author?.name,
       replyCount: tweet.replyCount,
       retweetCount: tweet.retweetCount,
@@ -159,7 +166,7 @@ async function poll(client) {
   const maxAgeMs = config.pollIntervalMinutes * 60 * 1000 * 2; // 2x interval as buffer
   
   try {
-    const tweets = await fetchLatestTweets(client, config.twitterHandle);
+    const tweets = await fetchLatestTweets(client, config.twitterHandles);
     
     if (tweets.length === 0) {
       console.log(`[${new Date().toISOString()}] No tweets found`);
@@ -214,7 +221,8 @@ async function poll(client) {
       } else if (tweet.isRetweet) {
         context = ` [Retweet]`;
       }
-      console.log(`[New Tweet]${context} ${tweet.id}: ${tweet.text?.substring(0, 100)}...`);
+      const author = tweet.author?.userName || 'unknown';
+      console.log(`[New Tweet] @${author}${context}: ${tweet.text?.substring(0, 100)}...`);
       await sendToWebhook(tweet);
     }
 
@@ -234,9 +242,9 @@ async function poll(client) {
 // ============================================
 async function main() {
   console.log('========================================');
-  console.log('  Elon Watcher - Tweet Monitor');
+  console.log('  Tweet Watcher - Multi-User Monitor');
   console.log('========================================');
-  console.log(`Target: @${config.twitterHandle}`);
+  console.log(`Targets: ${config.twitterHandles.map(h => '@' + h).join(', ')}`);
   console.log(`Poll interval: ${config.pollIntervalMinutes} minutes`);
   console.log(`Webhook URL: ${config.webhookUrl ? '✓ configured' : '✗ not set'}`);
   console.log(`Webhook secret: ${config.webhookSecret ? '✓ configured' : '✗ not set'}`);
