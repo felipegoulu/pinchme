@@ -1,10 +1,82 @@
 #!/usr/bin/env node
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { exec } = require('child_process');
 
 const PORT = process.env.PORT || 3001;
 const OPENCLAW_CMD = process.env.OPENCLAW_CMD || 'openclaw';
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || 
+  path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json');
+
+// ============================================
+// OpenClaw Config Management
+// ============================================
+function getOpenClawConfig() {
+  try {
+    const raw = fs.readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+    return JSON.parse(raw);
+  } catch (err) {
+    console.error(`[OpenClaw Config] Error reading: ${err.message}`);
+    return null;
+  }
+}
+
+function saveOpenClawConfig(config) {
+  try {
+    fs.writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
+    return true;
+  } catch (err) {
+    console.error(`[OpenClaw Config] Error saving: ${err.message}`);
+    return false;
+  }
+}
+
+function restartOpenClawGateway() {
+  return new Promise((resolve) => {
+    exec(`${OPENCLAW_CMD} gateway restart`, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`[OpenClaw] Restart error: ${error.message}`);
+        resolve({ success: false, error: error.message });
+      } else {
+        console.log(`[OpenClaw] Gateway restarted`);
+        resolve({ success: true });
+      }
+    });
+  });
+}
+
+function getHeartbeatStatus() {
+  return new Promise((resolve) => {
+    exec(`${OPENCLAW_CMD} system heartbeat last --json 2>/dev/null || ${OPENCLAW_CMD} system heartbeat last`, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ error: error.message });
+      } else {
+        try {
+          // Try to parse as JSON first
+          const parsed = JSON.parse(stdout);
+          resolve(parsed);
+        } catch {
+          // Return raw output
+          resolve({ raw: stdout.trim() });
+        }
+      }
+    });
+  });
+}
+
+function deepMerge(target, source) {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+      result[key] = deepMerge(result[key] || {}, source[key]);
+    } else {
+      result[key] = source[key];
+    }
+  }
+  return result;
+}
 
 // Store recent tweets to avoid duplicates
 const recentTweets = new Set();
@@ -66,8 +138,8 @@ function formatTweetMessage(tweet, handleConfig = {}) {
 const server = http.createServer((req, res) => {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, PUT, PATCH, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -129,6 +201,98 @@ const server = http.createServer((req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+    });
+    return;
+  }
+
+  // ============================================
+  // OpenClaw Config Endpoints
+  // ============================================
+  
+  // Get OpenClaw config
+  if (req.method === 'GET' && req.url === '/openclaw/config') {
+    const config = getOpenClawConfig();
+    if (config) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(config));
+    } else {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to read config' }));
+    }
+    return;
+  }
+
+  // Update OpenClaw config
+  if (req.method === 'PUT' && req.url === '/openclaw/config') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const newConfig = JSON.parse(body);
+        if (saveOpenClawConfig(newConfig)) {
+          // Auto-restart gateway after config change
+          const restartResult = await restartOpenClawGateway();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, restarted: restartResult.success }));
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to save config' }));
+        }
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Patch OpenClaw config (partial update)
+  if (req.method === 'PATCH' && req.url === '/openclaw/config') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const patch = JSON.parse(body);
+        const config = getOpenClawConfig();
+        if (!config) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to read config' }));
+          return;
+        }
+        
+        // Deep merge patch into config
+        const merged = deepMerge(config, patch);
+        
+        if (saveOpenClawConfig(merged)) {
+          const restartResult = await restartOpenClawGateway();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, restarted: restartResult.success }));
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Failed to save config' }));
+        }
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // Restart OpenClaw gateway
+  if (req.method === 'POST' && req.url === '/openclaw/restart') {
+    restartOpenClawGateway().then(result => {
+      res.writeHead(result.success ? 200 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  // Get heartbeat status
+  if (req.method === 'GET' && req.url === '/openclaw/heartbeat') {
+    getHeartbeatStatus().then(result => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     });
     return;
   }

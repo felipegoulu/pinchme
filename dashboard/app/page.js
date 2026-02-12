@@ -29,6 +29,11 @@ export default function Dashboard() {
   const [handleConfigs, setHandleConfigs] = useState({});
   const [editingHandle, setEditingHandle] = useState(null);
   const [handleConfigForm, setHandleConfigForm] = useState({ mode: 'now', prompt: '', channel: '' });
+  
+  // OpenClaw config
+  const [openclawConfig, setOpenclawConfig] = useState(null);
+  const [openclawHeartbeat, setOpenclawHeartbeat] = useState(null);
+  const [savingOpenclaw, setSavingOpenclaw] = useState(false);
 
   useEffect(() => { checkAuth(); }, []);
 
@@ -144,6 +149,79 @@ export default function Dashboard() {
     setHandleConfigForm({ mode: existing.mode || 'now', prompt: existing.prompt || '', channel: existing.channel || '' });
     setEditingHandle(handle);
   }
+
+  // OpenClaw config functions
+  async function fetchOpenclawConfig() {
+    if (!config.webhookUrl) return;
+    try {
+      const webhookBase = config.webhookUrl.replace(/\/$/, '');
+      const res = await fetch(`${webhookBase}/openclaw/config`);
+      if (res.ok) {
+        setOpenclawConfig(await res.json());
+        fetchOpenclawHeartbeat();
+      }
+    } catch (err) {
+      console.log('OpenClaw config not available:', err.message);
+    }
+  }
+
+  async function fetchOpenclawHeartbeat() {
+    if (!config.webhookUrl) return;
+    try {
+      const webhookBase = config.webhookUrl.replace(/\/$/, '');
+      const res = await fetch(`${webhookBase}/openclaw/heartbeat`);
+      if (res.ok) setOpenclawHeartbeat(await res.json());
+    } catch {}
+  }
+
+  async function saveOpenclawConfig(newConfig) {
+    if (!config.webhookUrl) return;
+    setSavingOpenclaw(true);
+    try {
+      const webhookBase = config.webhookUrl.replace(/\/$/, '');
+      const res = await fetch(`${webhookBase}/openclaw/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newConfig),
+      });
+      if (res.ok) {
+        setMessage({ type: 'success', text: 'OpenClaw config saved & gateway restarted' });
+        setOpenclawConfig(newConfig);
+        setTimeout(fetchOpenclawHeartbeat, 2000);
+      } else {
+        setMessage({ type: 'error', text: 'Failed to save OpenClaw config' });
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Connection error' });
+    } finally {
+      setSavingOpenclaw(false);
+    }
+  }
+
+  function updateHeartbeatConfig(key, value) {
+    if (!openclawConfig) return;
+    const updated = { ...openclawConfig };
+    if (!updated.agents) updated.agents = {};
+    if (!updated.agents.defaults) updated.agents.defaults = {};
+    if (!updated.agents.defaults.heartbeat) updated.agents.defaults.heartbeat = {};
+    updated.agents.defaults.heartbeat[key] = value;
+    setOpenclawConfig(updated);
+  }
+
+  function updateChannelHeartbeat(channel, key, value) {
+    if (!openclawConfig) return;
+    const updated = { ...openclawConfig };
+    if (!updated.channels) updated.channels = {};
+    if (!updated.channels[channel]) updated.channels[channel] = {};
+    if (!updated.channels[channel].heartbeat) updated.channels[channel].heartbeat = {};
+    updated.channels[channel].heartbeat[key] = value;
+    setOpenclawConfig(updated);
+  }
+
+  // Fetch openclaw config when webhook URL is available
+  useEffect(() => {
+    if (config.webhookUrl) fetchOpenclawConfig();
+  }, [config.webhookUrl]);
 
   async function saveConfig() {
     setSaving(true); setMessage(null);
@@ -316,6 +394,105 @@ export default function Dashboard() {
               <div className="status-item">
                 <span className="status-label">Last poll</span>
                 <span className="status-value">{status.state?.lastPoll ? new Date(status.state.lastPoll).toLocaleTimeString() : '—'}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {openclawConfig && (
+          <div className="section">
+            <div className="section-header">
+              <h2>🦞 OpenClaw</h2>
+              {openclawHeartbeat && (
+                <span className={`status-badge ${openclawHeartbeat.status === 'ok-token' ? 'ok' : ''}`}>
+                  {openclawHeartbeat.status === 'ok-token' ? '● OK' : openclawHeartbeat.status}
+                </span>
+              )}
+            </div>
+            <div className="section-body">
+              <label>Heartbeat Interval</label>
+              <div className="input-row">
+                <input 
+                  type="text" 
+                  value={openclawConfig?.agents?.defaults?.heartbeat?.every || '30m'}
+                  onChange={e => updateHeartbeatConfig('every', e.target.value)}
+                  placeholder="30m"
+                  style={{width: '100px'}}
+                />
+                <span className="hint-inline">e.g., 5m, 15m, 1h</span>
+              </div>
+
+              <label>Target Channel</label>
+              <select 
+                value={openclawConfig?.agents?.defaults?.heartbeat?.target || 'last'}
+                onChange={e => updateHeartbeatConfig('target', e.target.value)}
+              >
+                <option value="last">Last active</option>
+                <option value="telegram">Telegram</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="discord">Discord</option>
+                <option value="none">None (silent)</option>
+              </select>
+
+              {openclawConfig?.agents?.defaults?.heartbeat?.target === 'telegram' && (
+                <>
+                  <label>Telegram Chat ID</label>
+                  <input 
+                    type="text" 
+                    value={openclawConfig?.agents?.defaults?.heartbeat?.to || ''}
+                    onChange={e => updateHeartbeatConfig('to', e.target.value)}
+                    placeholder="e.g., 5679450975"
+                  />
+                </>
+              )}
+
+              <div className="checkbox-group">
+                <label className="checkbox-label">
+                  <input 
+                    type="checkbox"
+                    checked={openclawConfig?.agents?.defaults?.heartbeat?.includeReasoning || false}
+                    onChange={e => updateHeartbeatConfig('includeReasoning', e.target.checked)}
+                  />
+                  <span>Include Reasoning</span>
+                  <span className="hint-small">Show thinking process</span>
+                </label>
+              </div>
+
+              <div className="checkbox-group">
+                <label className="checkbox-label">
+                  <input 
+                    type="checkbox"
+                    checked={openclawConfig?.channels?.telegram?.heartbeat?.showOk || false}
+                    onChange={e => updateChannelHeartbeat('telegram', 'showOk', e.target.checked)}
+                  />
+                  <span>Show OK Messages</span>
+                  <span className="hint-small">Send message even when nothing to report</span>
+                </label>
+              </div>
+
+              {openclawHeartbeat && (
+                <div className="heartbeat-status">
+                  <span className="hint">Last heartbeat: {openclawHeartbeat.status} 
+                    {openclawHeartbeat.durationMs && ` (${openclawHeartbeat.durationMs}ms)`}
+                    {openclawHeartbeat.silent && ' — silent'}
+                  </span>
+                </div>
+              )}
+
+              <div className="actions" style={{marginTop: '16px', justifyContent: 'flex-start'}}>
+                <button 
+                  className="btn-primary" 
+                  onClick={() => saveOpenclawConfig(openclawConfig)}
+                  disabled={savingOpenclaw}
+                >
+                  {savingOpenclaw ? 'Saving...' : 'Save OpenClaw Config'}
+                </button>
+                <button 
+                  className="btn-secondary" 
+                  onClick={fetchOpenclawHeartbeat}
+                >
+                  Refresh Status
+                </button>
               </div>
             </div>
           </div>
@@ -963,5 +1140,55 @@ const styles = `
 
   textarea::placeholder {
     color: #444;
+  }
+
+  .status-badge {
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    background: #1a1a1a;
+    color: #666;
+  }
+
+  .status-badge.ok {
+    background: rgba(0, 200, 100, 0.1);
+    color: #0c8;
+  }
+
+  .hint-inline {
+    font-size: 12px;
+    color: #666;
+    margin-left: 12px;
+  }
+
+  .hint-small {
+    font-size: 11px;
+    color: #666;
+    margin-left: 8px;
+  }
+
+  .checkbox-group {
+    margin-top: 16px;
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  .checkbox-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+
+  .heartbeat-status {
+    margin-top: 16px;
+    padding: 12px;
+    background: #111;
+    border-radius: 8px;
   }
 `;
