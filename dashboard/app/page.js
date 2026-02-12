@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+const API_URL = 'https://elon-watcher-production.up.railway.app';
 
 export default function Dashboard() {
   const [auth, setAuth] = useState({ checked: false, authenticated: false, username: '' });
