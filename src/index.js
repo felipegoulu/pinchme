@@ -107,6 +107,27 @@ async function initDb() {
     ADD COLUMN IF NOT EXISTS mcp_activated_at TIMESTAMPTZ
   `).catch(() => {});
   
+  // Migration: handle_config might have been created without user_id
+  // Drop and recreate if needed (safe because it's config, not data)
+  try {
+    await pool.query(`SELECT user_id FROM handle_config LIMIT 1`);
+  } catch (e) {
+    console.log('[DB] Recreating handle_config with user_id column...');
+    await pool.query(`DROP TABLE IF EXISTS handle_config`);
+    await pool.query(`
+      CREATE TABLE handle_config (
+        handle TEXT NOT NULL,
+        user_id TEXT NOT NULL DEFAULT 'felipegoulu',
+        mode TEXT DEFAULT 'now',
+        prompt TEXT DEFAULT '',
+        channel TEXT DEFAULT '',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (handle, user_id)
+      )
+    `);
+  }
+  
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_config (
       user_id TEXT PRIMARY KEY,
