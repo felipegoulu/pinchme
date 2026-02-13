@@ -38,6 +38,13 @@ export default function Dashboard() {
   // Sent tweets log
   const [sentTweets, setSentTweets] = useState([]);
   const [showSentTweets, setShowSentTweets] = useState(false);
+  
+  // API Keys
+  const [apiKeys, setApiKeys] = useState([]);
+  const [showApiKeys, setShowApiKeys] = useState(false);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [generatingKey, setGeneratingKey] = useState(false);
+  const [newlyGeneratedKey, setNewlyGeneratedKey] = useState(null);
 
   useEffect(() => { checkAuth(); }, []);
 
@@ -244,6 +251,65 @@ export default function Dashboard() {
     } catch (err) {
       console.log('Failed to fetch sent tweets:', err.message);
     }
+  }
+
+  // API Key management
+  async function fetchApiKeys() {
+    try {
+      const res = await fetch(`${API_URL}/api-keys`, { headers: authHeaders() });
+      if (res.ok) setApiKeys(await res.json());
+    } catch (err) {
+      console.log('Failed to fetch API keys:', err.message);
+    }
+  }
+
+  async function generateApiKey() {
+    setGeneratingKey(true);
+    setNewlyGeneratedKey(null);
+    try {
+      const res = await fetch(`${API_URL}/api-keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ name: newKeyName || 'default' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setNewlyGeneratedKey(data.api_key);
+        setNewKeyName('');
+        fetchApiKeys();
+        setMessage({ type: 'success', text: 'API key generated! Copy it now, it won\'t be shown again.' });
+      } else {
+        const err = await res.json();
+        setMessage({ type: 'error', text: err.error || 'Failed to generate key' });
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Connection error' });
+    } finally {
+      setGeneratingKey(false);
+    }
+  }
+
+  async function deleteApiKey(apiKey) {
+    if (!confirm('Delete this API key? This cannot be undone.')) return;
+    try {
+      const res = await fetch(`${API_URL}/api-keys/${encodeURIComponent(apiKey)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        setMessage({ type: 'success', text: 'API key deleted' });
+        fetchApiKeys();
+      } else {
+        setMessage({ type: 'error', text: 'Failed to delete key' });
+      }
+    } catch {
+      setMessage({ type: 'error', text: 'Connection error' });
+    }
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text);
+    setMessage({ type: 'success', text: 'Copied to clipboard!' });
   }
 
   async function saveConfig() {
@@ -519,6 +585,78 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+
+        <div className="section">
+          <div className="section-header">
+            <h2>🔑 API Keys</h2>
+            <button 
+              className="btn-secondary btn-small" 
+              onClick={() => { setShowApiKeys(!showApiKeys); if (!showApiKeys) fetchApiKeys(); }}
+            >
+              {showApiKeys ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          {showApiKeys && (
+            <div className="section-body">
+              <p className="hint">Use API keys to access PinchMe from your AI agent via MCP.</p>
+              
+              <div className="api-key-form">
+                <input 
+                  type="text" 
+                  placeholder="Key name (optional)" 
+                  value={newKeyName}
+                  onChange={e => setNewKeyName(e.target.value)}
+                />
+                <button 
+                  className="btn-primary" 
+                  onClick={generateApiKey}
+                  disabled={generatingKey}
+                >
+                  {generatingKey ? 'Generating...' : 'Generate New Key'}
+                </button>
+              </div>
+
+              {newlyGeneratedKey && (
+                <div className="new-key-alert">
+                  <p><strong>⚠️ Copy this key now!</strong> It won't be shown again.</p>
+                  <div className="key-display">
+                    <code>{newlyGeneratedKey}</code>
+                    <button className="btn-secondary btn-small" onClick={() => copyToClipboard(newlyGeneratedKey)}>Copy</button>
+                  </div>
+                </div>
+              )}
+
+              <div className="api-keys-list">
+                {apiKeys.length === 0 ? (
+                  <div className="empty">No API keys generated yet</div>
+                ) : (
+                  apiKeys.map((key, i) => (
+                    <div key={i} className="api-key-item">
+                      <div className="api-key-info">
+                        <span className="api-key-name">{key.name}</span>
+                        <code className="api-key-value">{key.api_key}</code>
+                        <span className="api-key-date">{new Date(key.created_at).toLocaleDateString()}</span>
+                      </div>
+                      <div className="api-key-actions">
+                        <button className="btn-secondary btn-small" onClick={() => copyToClipboard(key.api_key_full)}>Copy</button>
+                        <button className="btn-danger btn-small" onClick={() => deleteApiKey(key.api_key_full)}>Delete</button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="mcp-info">
+                <h4>MCP Server URL</h4>
+                <div className="key-display">
+                  <code>https://pinchme-mcp-production.up.railway.app/sse</code>
+                  <button className="btn-secondary btn-small" onClick={() => copyToClipboard('https://pinchme-mcp-production.up.railway.app/sse')}>Copy</button>
+                </div>
+                <p className="hint">Add this URL to your AI agent's MCP config, then use your API key when calling tools.</p>
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="section">
           <div className="section-header">
@@ -1370,5 +1508,121 @@ const styles = `
     word-break: break-word;
     color: #ccc;
     font-family: 'Monaco', 'Menlo', monospace;
+  }
+
+  /* API Keys */
+  .api-key-form {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .api-key-form input {
+    flex: 1;
+  }
+
+  .new-key-alert {
+    background: rgba(255, 180, 0, 0.1);
+    border: 1px solid rgba(255, 180, 0, 0.3);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  .new-key-alert p {
+    margin: 0 0 12px;
+    color: #fb0;
+  }
+
+  .key-display {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #111;
+    padding: 12px;
+    border-radius: 6px;
+  }
+
+  .key-display code {
+    flex: 1;
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 13px;
+    color: #0c8;
+    word-break: break-all;
+  }
+
+  .api-keys-list {
+    margin-bottom: 20px;
+  }
+
+  .api-key-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+
+  .api-key-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .api-key-name {
+    font-weight: 500;
+    color: #fafafa;
+  }
+
+  .api-key-value {
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 12px;
+    color: #666;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .api-key-date {
+    font-size: 12px;
+    color: #666;
+  }
+
+  .api-key-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn-danger {
+    background: rgba(255, 0, 0, 0.1);
+    border: 1px solid rgba(255, 0, 0, 0.3);
+    color: #f66;
+  }
+
+  .btn-danger:hover {
+    background: rgba(255, 0, 0, 0.2);
+    border-color: #f66;
+  }
+
+  .mcp-info {
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 16px;
+  }
+
+  .mcp-info h4 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: #888;
+  }
+
+  .mcp-info .hint {
+    margin-top: 12px;
   }
 `;
