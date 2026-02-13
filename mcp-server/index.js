@@ -37,9 +37,11 @@ function createServer() {
       },
       required: ["api_key"]
     },
-    async ({ api_key }) => {
+    async (args) => {
+      console.log("[list_handles] Received args:", JSON.stringify(args));
+      const api_key = args?.api_key;
       if (!api_key) {
-        return { content: [{ type: "text", text: "Error: api_key is required. Get one from the PinchMe dashboard." }], isError: true };
+        return { content: [{ type: "text", text: `Error: api_key is required. Get one from the PinchMe dashboard. Received: ${JSON.stringify(args)}` }], isError: true };
       }
       try {
         const config = await apiCall("GET", "/config", api_key);
