@@ -10,6 +10,9 @@ const API_URL = process.env.API_URL || "https://elon-watcher-production.up.railw
 // Store authenticated sessions: sessionId -> { userId, apiKey }
 const sessions = {};
 
+// Global cache of validated API keys (persists across sessions)
+const validatedApiKeys = new Set();
+
 // Helper to call the backend API with user's API key
 async function apiCall(method, path, apiKey, body = null) {
   const url = `${API_URL}${path}`;
@@ -23,20 +26,42 @@ async function apiCall(method, path, apiKey, body = null) {
   return res.json();
 }
 
-// Validate API key against backend
+// Validate API key against backend (with caching)
 async function validateApiKey(apiKey) {
+  // Check cache first
+  if (validatedApiKeys.has(apiKey)) {
+    return true;
+  }
   try {
     const result = await apiCall("GET", "/config", apiKey);
-    return !result.error;
+    if (!result.error) {
+      validatedApiKeys.add(apiKey); // Cache valid key
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
 }
 
-// Get API key for session (from session store or parameter)
+// Get API key for session (from param, session store, or last used)
+let lastUsedApiKey = null;
+
 function getApiKey(sessionId, paramApiKey) {
-  if (paramApiKey) return paramApiKey;
-  return sessions[sessionId]?.apiKey || null;
+  // 1. Use param if provided
+  if (paramApiKey) {
+    lastUsedApiKey = paramApiKey; // Remember for future calls
+    return paramApiKey;
+  }
+  // 2. Use session-stored key
+  if (sessions[sessionId]?.apiKey) {
+    return sessions[sessionId].apiKey;
+  }
+  // 3. Use last successfully used key (persists across sessions)
+  if (lastUsedApiKey && validatedApiKeys.has(lastUsedApiKey)) {
+    return lastUsedApiKey;
+  }
+  return null;
 }
 
 // Create MCP server with session context
@@ -61,10 +86,12 @@ function createServer(sessionId) {
         return { content: [{ type: "text", text: "Error: Invalid API key" }], isError: true };
       }
       
-      // Store in session
+      // Store in session AND globally
       sessions[sessionId] = { apiKey: api_key, authenticatedAt: new Date().toISOString() };
+      lastUsedApiKey = api_key;
+      validatedApiKeys.add(api_key);
       
-      return { content: [{ type: "text", text: "✓ Authenticated! You can now use other tools without api_key." }] };
+      return { content: [{ type: "text", text: "✓ Authenticated! You can now use other tools without api_key (persists across sessions)." }] };
     }
   );
 
