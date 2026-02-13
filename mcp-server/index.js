@@ -30,7 +30,13 @@ function createServer() {
   server.tool(
     "list_handles",
     "List all Twitter/X handles being monitored",
-    { api_key: { type: "string", description: "Your PinchMe API key (pk_...)" } },
+    {
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" }
+      },
+      required: ["api_key"]
+    },
     async ({ api_key }) => {
       if (!api_key) {
         return { content: [{ type: "text", text: "Error: api_key is required. Get one from the PinchMe dashboard." }], isError: true };
@@ -61,8 +67,12 @@ function createServer() {
     "add_handle",
     "Add a Twitter/X handle to monitor",
     {
-      api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
-      handle: { type: "string", description: "Twitter/X username (without @)" },
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
+        handle: { type: "string", description: "Twitter/X username (without @)" },
+      },
+      required: ["api_key", "handle"]
     },
     async ({ api_key, handle }) => {
       if (!api_key) {
@@ -94,8 +104,12 @@ function createServer() {
     "remove_handle",
     "Remove a Twitter/X handle from monitoring",
     {
-      api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
-      handle: { type: "string", description: "Twitter/X username to remove" },
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
+        handle: { type: "string", description: "Twitter/X username to remove" },
+      },
+      required: ["api_key", "handle"]
     },
     async ({ api_key, handle }) => {
       if (!api_key) {
@@ -127,11 +141,15 @@ function createServer() {
     "configure_handle",
     "Configure alert settings for a specific handle",
     {
-      api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
-      handle: { type: "string", description: "Twitter/X username" },
-      mode: { type: "string", description: "Alert mode: 'now' (immediate) or 'next-heartbeat' (batched)" },
-      prompt: { type: "string", description: "Custom prompt/instructions for this handle's alerts" },
-      channel: { type: "string", description: "Channel to send alerts to (e.g., 'telegram', 'discord')" },
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
+        handle: { type: "string", description: "Twitter/X username" },
+        mode: { type: "string", description: "Alert mode: 'now' (immediate) or 'next-heartbeat' (batched)" },
+        prompt: { type: "string", description: "Custom prompt/instructions for this handle's alerts" },
+        channel: { type: "string", description: "Channel to send alerts to (e.g., 'telegram', 'discord')" },
+      },
+      required: ["api_key", "handle"]
     },
     async ({ api_key, handle, mode, prompt, channel }) => {
       if (!api_key) {
@@ -163,8 +181,12 @@ function createServer() {
     "get_handle_config",
     "Get alert configuration for a specific handle",
     {
-      api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
-      handle: { type: "string", description: "Twitter/X username" },
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
+        handle: { type: "string", description: "Twitter/X username" },
+      },
+      required: ["api_key", "handle"]
     },
     async ({ api_key, handle }) => {
       if (!api_key) {
@@ -190,7 +212,13 @@ function createServer() {
   server.tool(
     "poll_now",
     "Trigger an immediate poll for new tweets",
-    { api_key: { type: "string", description: "Your PinchMe API key (pk_...)" } },
+    {
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" }
+      },
+      required: ["api_key"]
+    },
     async ({ api_key }) => {
       if (!api_key) {
         return { content: [{ type: "text", text: "Error: api_key is required" }], isError: true };
@@ -212,8 +240,12 @@ function createServer() {
     "get_recent_tweets",
     "Get recently captured tweets",
     {
-      api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
-      limit: { type: "number", description: "Number of tweets (default: 10)" },
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
+        limit: { type: "number", description: "Number of tweets (default: 10)" },
+      },
+      required: ["api_key"]
     },
     async ({ api_key, limit = 10 }) => {
       if (!api_key) {
@@ -244,7 +276,13 @@ function createServer() {
   server.tool(
     "get_status",
     "Get current monitoring status",
-    { api_key: { type: "string", description: "Your PinchMe API key (pk_...)" } },
+    {
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" }
+      },
+      required: ["api_key"]
+    },
     async ({ api_key }) => {
       if (!api_key) {
         return { content: [{ type: "text", text: "Error: api_key is required" }], isError: true };
@@ -279,8 +317,12 @@ function createServer() {
     "set_poll_interval",
     "Change how often to check for new tweets",
     {
-      api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
-      minutes: { type: "number", description: "Poll interval in minutes (1-60)" },
+      type: "object",
+      properties: {
+        api_key: { type: "string", description: "Your PinchMe API key (pk_...)" },
+        minutes: { type: "number", description: "Poll interval in minutes (1-60)" },
+      },
+      required: ["api_key", "minutes"]
     },
     async ({ api_key, minutes }) => {
       if (!api_key) {
