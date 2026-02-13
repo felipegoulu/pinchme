@@ -182,42 +182,35 @@ function isValidHandleFormat(handle) {
 }
 
 async function verifyTwitterHandle(handle) {
-  // Use Apify to check if handle exists by fetching 1 tweet
-  if (!client) {
-    console.log(`[Verify] Apify client not ready, skipping verification for @${handle}`);
-    return { valid: true, reason: 'skipped' };
-  }
+  // Quick check via Twitter's intent API (no auth needed, fast)
+  const https = require('https');
   
-  try {
-    const input = {
-      searchTerms: [`from:${handle}`],
-      sort: 'Latest',
-      maxItems: 1,
-    };
+  return new Promise((resolve) => {
+    const url = `https://twitter.com/intent/user?screen_name=${handle}`;
     
-    const run = await client.actor('apidojo/twitter-scraper-lite').call(input, {
-      waitSecs: 30,
+    const req = https.get(url, { timeout: 5000 }, (res) => {
+      // 200 = exists, 404 = not found, 302 = redirect (usually exists)
+      if (res.statusCode === 200 || res.statusCode === 302) {
+        resolve({ valid: true, reason: 'exists' });
+      } else if (res.statusCode === 404) {
+        resolve({ valid: false, reason: 'not_found' });
+      } else {
+        // Other status - assume valid to avoid false negatives
+        resolve({ valid: true, reason: `status_${res.statusCode}` });
+      }
     });
     
-    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+    req.on('error', (err) => {
+      console.error(`[Verify] Error checking @${handle}: ${err.message}`);
+      // On error, assume valid to avoid blocking
+      resolve({ valid: true, reason: 'error_skipped' });
+    });
     
-    // If we got any tweets, the handle exists
-    if (items.length > 0) {
-      return { valid: true, reason: 'has_tweets' };
-    }
-    
-    // No tweets could mean: new account, private, or doesn't exist
-    // We'll accept it but warn
-    return { valid: true, reason: 'no_tweets_found' };
-  } catch (err) {
-    // Check if it's a "user not found" type error
-    if (err.message && (err.message.includes('not found') || err.message.includes('does not exist'))) {
-      return { valid: false, reason: 'not_found' };
-    }
-    // Other errors - let it through but warn
-    console.error(`[Verify] Error checking @${handle}: ${err.message}`);
-    return { valid: true, reason: 'error_skipped' };
-  }
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ valid: true, reason: 'timeout_skipped' });
+    });
+  });
 }
 
 async function validateHandles(handles) {
