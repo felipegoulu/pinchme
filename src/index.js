@@ -22,7 +22,7 @@ let client = null;
 
 // Debug state for monitoring
 const debugState = {
-  version: '2.0.0-lite', // Using twitter-scraper-lite
+  version: '2.1.0', // Added handle validation
   startedAt: new Date().toISOString(),
   lastPollAttempt: null,
   lastPollSuccess: null,
@@ -171,6 +171,76 @@ async function initDb() {
 
 function hashPassword(password) {
   return createHash('sha256').update(password).digest('hex');
+}
+
+// ============================================
+// Twitter Handle Validation
+// ============================================
+function isValidHandleFormat(handle) {
+  // Twitter handles: 1-15 chars, alphanumeric + underscore
+  return /^[a-zA-Z0-9_]{1,15}$/.test(handle);
+}
+
+async function verifyTwitterHandle(handle) {
+  // Use Apify to check if handle exists by fetching 1 tweet
+  if (!client) {
+    console.log(`[Verify] Apify client not ready, skipping verification for @${handle}`);
+    return { valid: true, reason: 'skipped' };
+  }
+  
+  try {
+    const input = {
+      searchTerms: [`from:${handle}`],
+      sort: 'Latest',
+      maxItems: 1,
+    };
+    
+    const run = await client.actor('apidojo/twitter-scraper-lite').call(input, {
+      waitSecs: 30,
+    });
+    
+    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+    
+    // If we got any tweets, the handle exists
+    if (items.length > 0) {
+      return { valid: true, reason: 'has_tweets' };
+    }
+    
+    // No tweets could mean: new account, private, or doesn't exist
+    // We'll accept it but warn
+    return { valid: true, reason: 'no_tweets_found' };
+  } catch (err) {
+    // Check if it's a "user not found" type error
+    if (err.message && (err.message.includes('not found') || err.message.includes('does not exist'))) {
+      return { valid: false, reason: 'not_found' };
+    }
+    // Other errors - let it through but warn
+    console.error(`[Verify] Error checking @${handle}: ${err.message}`);
+    return { valid: true, reason: 'error_skipped' };
+  }
+}
+
+async function validateHandles(handles) {
+  const results = [];
+  const invalid = [];
+  
+  for (const handle of handles) {
+    // First check format
+    if (!isValidHandleFormat(handle)) {
+      invalid.push({ handle, reason: 'invalid_format' });
+      continue;
+    }
+    
+    // Then verify exists (with Apify)
+    const verification = await verifyTwitterHandle(handle);
+    if (!verification.valid) {
+      invalid.push({ handle, reason: verification.reason });
+    } else {
+      results.push(handle);
+    }
+  }
+  
+  return { valid: results, invalid };
 }
 
 // ============================================
@@ -750,6 +820,40 @@ function createApiServer() {
         return;
       }
 
+      // Validate handle endpoint
+      if (path === '/validate-handle' && req.method === 'POST') {
+        if (!await requireAuth(req, res)) return;
+        const { handle } = await parseBody(req);
+        
+        if (!handle) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'handle is required' }));
+          return;
+        }
+        
+        const cleanHandle = handle.replace(/^@/, '').trim().toLowerCase();
+        
+        if (!isValidHandleFormat(cleanHandle)) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            handle: cleanHandle,
+            valid: false,
+            reason: 'invalid_format',
+            hint: 'Handle must be 1-15 characters, alphanumeric or underscore'
+          }));
+          return;
+        }
+        
+        const result = await verifyTwitterHandle(cleanHandle);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          handle: cleanHandle,
+          valid: result.valid,
+          reason: result.reason
+        }));
+        return;
+      }
+
       // Login
       if (path === '/auth/login' && req.method === 'POST') {
         const { username, password } = await parseBody(req);
@@ -945,9 +1049,24 @@ function createApiServer() {
         newConfig.pollIntervalMinutes = interval;
         
         // Clean handles
-        newConfig.handles = newConfig.handles
+        const cleanedHandles = newConfig.handles
           .map(h => h.replace(/^@/, '').trim().toLowerCase())
           .filter(Boolean);
+        
+        // Validate handles exist on Twitter
+        const { valid, invalid } = await validateHandles(cleanedHandles);
+        
+        if (invalid.length > 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            error: 'Some handles are invalid',
+            invalid: invalid,
+            hint: 'Remove invalid handles and try again'
+          }));
+          return;
+        }
+        
+        newConfig.handles = valid;
         
         await saveUserConfig(userId, newConfig);
         restartPolling();
